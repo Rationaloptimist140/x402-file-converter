@@ -1,1 +1,5 @@
-ewogICJkZXBsb3kiOiB7CiAgICAic3RhcnRDb21tYW5kIjogInV2aWNvcm4gbWFpbjphcHAgLS1ob3N0IDAuMC4wLjAgLS1wb3J0ICRQT1JUIgogIH0KfQ==
+RAWJSON:{
+  "deploy": {
+    "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT"
+  }
+}
