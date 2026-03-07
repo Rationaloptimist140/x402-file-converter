@@ -1,1 +1,0 @@
-{\n  "$schema": "https://railway.app/railway.schema.json",\n  "build": {\n    "builder": "NIXPACKS"\n  },\n  "deploy": {\n    "startCommand": "uvicorn main:app --host 0.0.0.0 --port $PORT",\n    "healthcheckPath": "/health",\n    "healthcheckTimeout": 30,\n    "restartPolicyType": "ON_FAILURE",\n    "restartPolicyMaxRetries": 3\n  }\n}
