@@ -12,23 +12,23 @@ from typing import Literal
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 from PIL import Image
-from x402.middleware.fastapi import x402_middleware
+from x402.integrations.fastapi import x402_middleware
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Logging
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Configuration
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 WALLET_ADDRESS: str = os.getenv(
     "PAYMENT_WALLET_ADDRESS",
-    "0x65F204B928a32806FCb364cB8d36B49b647c9f30",
+    "0x65F204B928a32806FCB364cB8d36B49b647c9f30",
 )
 PRICE_USDC: str = os.getenv("PRICE_USDC", "0.02")
 NETWORK: str = os.getenv("NETWORK", "base")
@@ -51,9 +51,9 @@ MIME_MAP: dict[str, str] = {
     "webp": "image/webp",
 }
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # App
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 app = FastAPI(
     title=SERVICE_NAME,
     version=SERVICE_VERSION,
@@ -65,26 +65,21 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # x402 Payment Middleware
-# ---------------------------------------------------------------------------
-app.add_middleware(
-    x402_middleware,
-    wallet_address="0x65F204B928a32806FCb364cB8d36B49b647c9f30",
+# -----------------------------------------------------------------------------
+x402_middleware(
+    app,
+    pay_to=WALLET_ADDRESS,
+    network="eip155:8453",
     routes={
-        "/convert": {
-            "price": "0.02",
-            "network": "base-mainnet",
-            "description": "Image format conversion - $0.02 USDC",
-        }
+        "/convert": {"price": f"${PRICE_USDC}", "description": "Image format conversion"},
     },
 )
 
-
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Routes
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 @app.get("/", summary="Service info")
 async def root():
     """Return metadata about this service."""
@@ -96,141 +91,83 @@ async def root():
             "amount": PRICE_USDC,
             "currency": "USDC",
             "network": NETWORK,
-            "payTo": WALLET_ADDRESS,
-            "protocol": "x402",
         },
-        "supportedFormats": sorted(SUPPORTED_FORMATS),
+        "supported_formats": list(SUPPORTED_FORMATS),
         "endpoints": {
-            "GET /": "Service info (this response)",
-            "GET /health": "Health check",
-            "POST /convert": "Convert an image (payment required)",
-            "GET /docs": "Interactive API docs (Swagger UI)",
+            "/convert": "POST - Convert image format (requires payment)",
+            "/health": "GET - Health check endpoint",
         },
     }
 
 
 @app.get("/health", summary="Health check")
 async def health():
-    """Liveness probe - returns 200 if the service is running."""
-    return {"status": "healthy"}
+    """Simple health check endpoint for Railway/monitoring."""
+    return {"status": "healthy", "service": SERVICE_NAME}
 
 
-@app.post(
-    "/convert",
-    summary="Convert an image",
-    responses={
-        200: {"description": "Converted image file", "content": {"image/*": {}}},
-        400: {"description": "Bad request"},
-        402: {"description": "Payment required"},
-        415: {"description": "Unsupported media type"},
-        500: {"description": "Internal server error"},
-    },
-)
+@app.post("/convert", summary="Convert image format")
 async def convert_image(
-    file: UploadFile = File(..., description="Source image file"),
-    target_format: Literal["png", "jpg", "jpeg", "webp"] = Form(
-        ...,
-        description="Desired output format: png | jpg | jpeg | webp",
-        alias="format",
+    file: UploadFile = File(..., description="Image file to convert"),
+    output_format: Literal["png", "jpg", "jpeg", "webp"] = Form(
+        ..., description="Target format"
     ),
 ):
     """
-    Upload an image and receive it back in the requested format.
+    Convert an uploaded image to a different format.
 
-    Payment: Include an X-PAYMENT header with a valid x402 payment proof
-    for $0.02 USDC on Base before this endpoint will process your request.
+    **Payment Required:** This endpoint requires payment via x402 protocol headers.
+    - Cost: $0.02 USDC
+    - Network: Base
+    - Wallet: 0x65F204B928a32806FCB364cB8d36B49b647c9f30
+
+    **Supported formats:** PNG, JPG / JPEG, WebP
+
+    **Returns:** The converted image as binary data.
     """
-    fmt = target_format.lower().strip()
-    if fmt not in SUPPORTED_FORMATS:
+    logger.info(f"Received conversion request: {file.filename} -> {output_format}")
+
+    if output_format not in SUPPORTED_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported target format '{fmt}'. Choose from: {sorted(SUPPORTED_FORMATS)}",
-        )
-
-    allowed_input_types = {
-        "image/png", "image/jpeg", "image/jpg",
-        "image/webp", "image/gif", "image/bmp",
-        "image/tiff", "image/x-tiff",
-        "application/octet-stream",
-    }
-    content_type = (file.content_type or "").lower()
-    if content_type and content_type not in allowed_input_types:
-        raise HTTPException(
-            status_code=415,
-            detail=f"Unsupported input media type: {content_type}",
+            detail=f"Unsupported output format. Choose from: {SUPPORTED_FORMATS}",
         )
 
     try:
-        raw = await file.read()
-        if not raw:
-            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        contents = await file.read()
+        logger.info(f"Read {len(contents)} bytes from upload")
 
-        image: Image.Image = Image.open(io.BytesIO(raw))
+        img = Image.open(io.BytesIO(contents))
+        logger.info(f"Opened image: {img.format} {img.size} {img.mode}")
 
-        pil_format = PIL_FORMAT_MAP[fmt]
-        if pil_format == "JPEG" and image.mode in ("RGBA", "P", "LA"):
-            background = Image.new("RGB", image.size, (255, 255, 255))
-            if image.mode == "P":
-                image = image.convert("RGBA")
-            background.paste(image, mask=image.split()[-1] if image.mode in ("RGBA", "LA") else None)
-            image = background
-        elif image.mode == "P":
-            image = image.convert("RGBA")
+        if output_format in {"jpg", "jpeg"} and img.mode in ("RGBA", "LA", "P"):
+            logger.info(f"Converting {img.mode} to RGB for JPEG output")
+            rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode == "P":
+                img = img.convert("RGBA")
+            rgb_img.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
+            img = rgb_img
 
-        output_buffer = io.BytesIO()
-        save_kwargs: dict = {"format": pil_format}
-        if pil_format == "JPEG":
-            save_kwargs["quality"] = 92
-            save_kwargs["optimize"] = True
-        elif pil_format == "WEBP":
-            save_kwargs["quality"] = 90
-            save_kwargs["method"] = 6
+        output = io.BytesIO()
+        pil_format = PIL_FORMAT_MAP[output_format]
+        img.save(output, format=pil_format)
+        output.seek(0)
 
-        image.save(output_buffer, **save_kwargs)
-        output_buffer.seek(0)
+        logger.info(f"Successfully converted to {output_format}")
 
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Conversion failed: %s", exc)
-        raise HTTPException(
-            status_code=500,
-            detail=f"Image conversion failed: {exc}",
+        return Response(
+            content=output.read(),
+            media_type=MIME_MAP[output_format],
+            headers={
+                "Content-Disposition": f'attachment; filename="converted.{output_format}"'
+            },
         )
 
-    original_stem = os.path.splitext(file.filename or "image")[0]
-    output_filename = f"{original_stem}_converted.{fmt}"
-    mime_type = MIME_MAP[fmt]
-
-    logger.info(
-        "Converted '%s' -> '%s' (%d bytes)",
-        file.filename,
-        output_filename,
-        output_buffer.getbuffer().nbytes,
-    )
-
-    return Response(
-        content=output_buffer.read(),
-        media_type=mime_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{output_filename}"',
-            "X-PAYMENT-RESPONSE": "success",
-            "X-Converted-From": file.content_type or "unknown",
-            "X-Converted-To": mime_type,
-        },
-    )
+    except Exception as e:
+        logger.error(f"Conversion failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        reload=os.getenv("ENV", "production") == "development",
-        log_level="info",
-    )
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
