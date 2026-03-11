@@ -7,73 +7,38 @@ Payment: $0.02 USDC per conversion via x402 protocol.
 import io
 import os
 import logging
-from typing import Literal
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.responses import Response
-from PIL import Image
 
 from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
+from x402.schemas import Network
 from x402.server import x402ResourceServer
 
-# -----------------------------------------------------------------------------
-# Logging
-# -----------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
+from PIL import Image
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# Configuration
-# -----------------------------------------------------------------------------
-WALLET_ADDRESS: str = os.getenv(
-    "PAYMENT_WALLET_ADDRESS",
-    "0x65F204B928a32806FCB364cB8d36B49b647c9f30",
-)
-PRICE_USDC: str = os.getenv("PRICE_USDC", "0.02")
-NETWORK = "eip155:8453"  # Base mainnet
+# ── Config ────────────────────────────────────────────────────────────────────
+PAY_TO_ADDRESS = os.getenv("EVM_ADDRESS", "0x7c2e102FC6D1FbCd3E62C936d3d394Bd55C949f2")
+NETWORK: Network = "eip155:8453"          # Base mainnet
 FACILITATOR_URL = os.getenv("FACILITATOR_URL", "https://x402.org/facilitator")
-SERVICE_NAME: str = "x402 File Converter"
-SERVICE_VERSION: str = "1.0.0"
+PRICE = "$0.02"
 
-SUPPORTED_FORMATS = {"png", "jpg", "jpeg", "webp"}
+SUPPORTED_FORMATS = {"jpeg", "jpg", "png", "webp"}
 
-PIL_FORMAT_MAP: dict[str, str] = {
-    "png": "PNG",
-    "jpg": "JPEG",
-    "jpeg": "JPEG",
-    "webp": "WEBP",
-}
-
-MIME_MAP: dict[str, str] = {
-    "png": "image/png",
-    "jpg": "image/jpeg",
-    "jpeg": "image/jpeg",
-    "webp": "image/webp",
-}
-
-# -----------------------------------------------------------------------------
-# App
-# -----------------------------------------------------------------------------
+# ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title=SERVICE_NAME,
-    version=SERVICE_VERSION,
-    description=(
-        "Convert images between PNG, JPG, JPEG, and WebP formats. "
-        f"Each conversion costs ${PRICE_USDC} USDC (paid via x402 protocol)."
-    ),
-    docs_url="/docs",
-    redoc_url="/redoc",
+    title="x402 File Converter",
+    version="1.0.0",
+    description="Convert images between PNG/JPG/WebP formats. Costs $0.02 USDC per conversion via x402.",
 )
 
-# -----------------------------------------------------------------------------
-# x402 Payment Middleware (v2.0.0 API)
-# -----------------------------------------------------------------------------
+# ── x402 Middleware ───────────────────────────────────────────────────────────
 facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=FACILITATOR_URL))
 server = x402ResourceServer(facilitator)
 server.register(NETWORK, ExactEvmServerScheme())
@@ -83,103 +48,70 @@ routes = {
         accepts=[
             PaymentOption(
                 scheme="exact",
-                pay_to=WALLET_ADDRESS,
-                price=f"${PRICE_USDC}",
+                pay_to=PAY_TO_ADDRESS,
+                price=PRICE,
                 network=NETWORK,
             )
         ],
-        mime_type="application/octet-stream",
-        description="Image format conversion",
+        mime_type="image/*",
+        description="Convert image format ($0.02 USDC)",
     ),
 }
 
 app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 
-# -----------------------------------------------------------------------------
-# Routes
-# -----------------------------------------------------------------------------
-@app.get("/", summary="Service info")
+# ── Routes ────────────────────────────────────────────────────────────────────
+@app.get("/")
 async def root():
-    """Return metadata about this service."""
     return {
-        "service": SERVICE_NAME,
-        "version": SERVICE_VERSION,
-        "description": "Convert images between PNG, JPG, JPEG, and WebP formats.",
-        "pricing": {
-            "amount": PRICE_USDC,
-            "currency": "USDC",
-            "network": NETWORK,
-        },
-        "supported_formats": list(SUPPORTED_FORMATS),
-        "endpoints": {
-            "GET /": "This information",
-            "POST /convert": "Convert an uploaded image to a new format",
-            "GET /health": "Health check",
-        },
+        "service": "x402 File Converter",
+        "version": "1.0.0",
+        "payment": f"{PRICE} USDC on Base (eip155:8453)",
+        "supported_formats": sorted(SUPPORTED_FORMATS),
+        "usage": "POST /convert with file + output_format",
     }
 
-
-@app.get("/health", summary="Health check")
+@app.get("/health")
 async def health():
-    """Return 200 if service is alive."""
     return {"status": "ok"}
 
-
-@app.post("/convert", summary="Convert image format")
+@app.post("/convert")
 async def convert_image(
-    file: UploadFile = File(..., description="Image file to convert"),
-    to_format: Literal["png", "jpg", "jpeg", "webp"] = Form(
-        ..., description="Target format"
-    ),
+    file: UploadFile = File(...),
+    output_format: str = Form(...),
 ):
-    """
-    Convert an uploaded image to the desired format.
-    Requires x402 payment header.
-    """
-    logger.info(f"Received conversion request: {file.filename} -> {to_format}")
-
-    if to_format not in SUPPORTED_FORMATS:
+    output_format = output_format.lower().strip()
+    if output_format not in SUPPORTED_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported format '{to_format}'. Use: {SUPPORTED_FORMATS}",
+            detail=f"Unsupported format '{output_format}'. Choose from: {sorted(SUPPORTED_FORMATS)}",
         )
 
+    data = await file.read()
     try:
-        image_bytes = await file.read()
-        logger.info(f"Read {len(image_bytes)} bytes")
+        img = Image.open(io.BytesIO(data))
     except Exception as e:
-        logger.error(f"Failed to read file: {e}")
-        raise HTTPException(status_code=400, detail="Could not read uploaded file")
+        raise HTTPException(status_code=400, detail=f"Cannot open image: {e}")
 
-    try:
-        image = Image.open(io.BytesIO(image_bytes))
-        logger.info(f"Opened image: {image.format} {image.size} {image.mode}")
-    except Exception as e:
-        logger.error(f"Failed to open image: {e}")
-        raise HTTPException(status_code=400, detail="Invalid image file")
+    # Convert RGBA/P to RGB for JPEG
+    save_format = "JPEG" if output_format in ("jpg", "jpeg") else output_format.upper()
+    if save_format == "JPEG" and img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
 
-    if to_format in {"jpg", "jpeg"} and image.mode in {"RGBA", "P", "LA"}:
-        logger.info(f"Converting {image.mode} -> RGB for JPEG")
-        rgb = Image.new("RGB", image.size, (255, 255, 255))
-        if image.mode == "P":
-            image = image.convert("RGBA")
-        rgb.paste(image, mask=image.split()[-1] if image.mode in {"RGBA", "LA"} else None)
-        image = rgb
+    buf = io.BytesIO()
+    img.save(buf, format=save_format)
+    buf.seek(0)
 
-    output = io.BytesIO()
-    try:
-        pil_format = PIL_FORMAT_MAP[to_format]
-        image.save(output, format=pil_format)
-        output.seek(0)
-        logger.info(f"Converted to {pil_format}, size={output.getbuffer().nbytes}")
-    except Exception as e:
-        logger.error(f"Conversion failed: {e}")
-        raise HTTPException(status_code=500, detail="Image conversion failed")
+    mime = "image/jpeg" if save_format == "JPEG" else f"image/{output_format}"
+    ext = "jpg" if save_format == "JPEG" else output_format
+    original_name = (file.filename or "image").rsplit(".", 1)[0]
 
-    mime = MIME_MAP[to_format]
-    filename = f"converted.{to_format}"
     return Response(
-        content=output.getvalue(),
+        content=buf.read(),
         media_type=mime,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{original_name}.{ext}"'},
     )
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
