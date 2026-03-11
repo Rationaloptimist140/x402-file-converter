@@ -23,22 +23,22 @@ from PIL import Image
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ── Config ────────────────────────────────────────────────────────────────────
+# ── Config ──────────────────────────────────────────────────────────────────────
 PAY_TO_ADDRESS = os.getenv("EVM_ADDRESS", "0x7c2e102FC6D1FbCd3E62C936d3d394Bd55C949f2")
-NETWORK: Network = "eip155:8453"          # Base mainnet
+NETWORK: Network = "eip155:84532"         # Base Sepolia (testnet - x402.org facilitator)
 FACILITATOR_URL = os.getenv("FACILITATOR_URL", "https://x402.org/facilitator")
 PRICE = "$0.02"
 
 SUPPORTED_FORMATS = {"jpeg", "jpg", "png", "webp"}
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# ── App ─────────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="x402 File Converter",
     version="1.0.0",
     description="Convert images between PNG/JPG/WebP formats. Costs $0.02 USDC per conversion via x402.",
 )
 
-# ── x402 Middleware ───────────────────────────────────────────────────────────
+# ── x402 Middleware ─────────────────────────────────────────────────────────────
 facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=FACILITATOR_URL))
 server = x402ResourceServer(facilitator)
 server.register(NETWORK, ExactEvmServerScheme())
@@ -60,13 +60,13 @@ routes = {
 
 app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+# ── Routes ──────────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
     return {
         "service": "x402 File Converter",
         "version": "1.0.0",
-        "payment": f"{PRICE} USDC on Base (eip155:8453)",
+        "payment": f"{PRICE} USDC on Base Sepolia (eip155:84532)",
         "supported_formats": sorted(SUPPORTED_FORMATS),
         "usage": "POST /convert with file + output_format",
     }
@@ -80,38 +80,35 @@ async def convert_image(
     file: UploadFile = File(...),
     output_format: str = Form(...),
 ):
-    output_format = output_format.lower().strip()
+    """
+    Convert an uploaded image to the specified format.
+    Requires x402 payment header.
+    """
+    output_format = output_format.lower()
     if output_format not in SUPPORTED_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported format '{output_format}'. Choose from: {sorted(SUPPORTED_FORMATS)}",
+            detail=f"Unsupported format '{output_format}'. Use one of: {', '.join(sorted(SUPPORTED_FORMATS))}",
         )
 
-    data = await file.read()
     try:
-        img = Image.open(io.BytesIO(data))
+        # Read uploaded file
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents))
+
+        # Convert if needed (handle palette mode)
+        if image.mode in ("P", "RGBA") and output_format in {"jpg", "jpeg"}:
+            image = image.convert("RGB")
+
+        # Save to bytes
+        output = io.BytesIO()
+        save_format = "JPEG" if output_format in {"jpg", "jpeg"} else output_format.upper()
+        image.save(output, format=save_format)
+        output.seek(0)
+
+        media_type = f"image/{output_format}"
+        return Response(content=output.read(), media_type=media_type)
+
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Cannot open image: {e}")
-
-    # Convert RGBA/P to RGB for JPEG
-    save_format = "JPEG" if output_format in ("jpg", "jpeg") else output_format.upper()
-    if save_format == "JPEG" and img.mode in ("RGBA", "P"):
-        img = img.convert("RGB")
-
-    buf = io.BytesIO()
-    img.save(buf, format=save_format)
-    buf.seek(0)
-
-    mime = "image/jpeg" if save_format == "JPEG" else f"image/{output_format}"
-    ext = "jpg" if save_format == "JPEG" else output_format
-    original_name = (file.filename or "image").rsplit(".", 1)[0]
-
-    return Response(
-        content=buf.read(),
-        media_type=mime,
-        headers={"Content-Disposition": f'attachment; filename="{original_name}.{ext}"'},
-    )
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+        logger.error(f"Conversion failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
