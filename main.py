@@ -10,9 +10,14 @@ import logging
 from typing import Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from PIL import Image
-from x402.integrations.fastapi import x402_middleware
+
+from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
+from x402.http.middleware.fastapi import PaymentMiddlewareASGI
+from x402.http.types import RouteConfig
+from x402.mechanisms.evm.exact import ExactEvmServerScheme
+from x402.server import x402ResourceServer
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -31,7 +36,8 @@ WALLET_ADDRESS: str = os.getenv(
     "0x65F204B928a32806FCB364cB8d36B49b647c9f30",
 )
 PRICE_USDC: str = os.getenv("PRICE_USDC", "0.02")
-NETWORK: str = os.getenv("NETWORK", "base")
+NETWORK = "eip155:8453"  # Base mainnet
+FACILITATOR_URL = os.getenv("FACILITATOR_URL", "https://x402.org/facilitator")
 SERVICE_NAME: str = "x402 File Converter"
 SERVICE_VERSION: str = "1.0.0"
 
@@ -66,16 +72,28 @@ app = FastAPI(
 )
 
 # -----------------------------------------------------------------------------
-# x402 Payment Middleware
+# x402 Payment Middleware (v2.0.0 API)
 # -----------------------------------------------------------------------------
-x402_middleware(
-    app,
-    pay_to=WALLET_ADDRESS,
-    network="eip155:8453",
-    routes={
-        "/convert": {"price": f"${PRICE_USDC}", "description": "Image format conversion"},
-    },
-)
+facilitator = HTTPFacilitatorClient(FacilitatorConfig(url=FACILITATOR_URL))
+server = x402ResourceServer(facilitator)
+server.register(NETWORK, ExactEvmServerScheme())
+
+routes = {
+    "POST /convert": RouteConfig(
+        accepts=[
+            PaymentOption(
+                scheme="exact",
+                pay_to=WALLET_ADDRESS,
+                price=f"${PRICE_USDC}",
+                network=NETWORK,
+            )
+        ],
+        mime_type="application/octet-stream",
+        description="Image format conversion",
+    ),
+}
+
+app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 
 # -----------------------------------------------------------------------------
 # Routes
@@ -94,80 +112,74 @@ async def root():
         },
         "supported_formats": list(SUPPORTED_FORMATS),
         "endpoints": {
-            "/convert": "POST - Convert image format (requires payment)",
-            "/health": "GET - Health check endpoint",
+            "GET /": "This information",
+            "POST /convert": "Convert an uploaded image to a new format",
+            "GET /health": "Health check",
         },
     }
 
 
 @app.get("/health", summary="Health check")
 async def health():
-    """Simple health check endpoint for Railway/monitoring."""
-    return {"status": "healthy", "service": SERVICE_NAME}
+    """Return 200 if service is alive."""
+    return {"status": "ok"}
 
 
 @app.post("/convert", summary="Convert image format")
 async def convert_image(
     file: UploadFile = File(..., description="Image file to convert"),
-    output_format: Literal["png", "jpg", "jpeg", "webp"] = Form(
+    to_format: Literal["png", "jpg", "jpeg", "webp"] = Form(
         ..., description="Target format"
     ),
 ):
     """
-    Convert an uploaded image to a different format.
-
-    **Payment Required:** This endpoint requires payment via x402 protocol headers.
-    - Cost: $0.02 USDC
-    - Network: Base
-    - Wallet: 0x65F204B928a32806FCB364cB8d36B49b647c9f30
-
-    **Supported formats:** PNG, JPG / JPEG, WebP
-
-    **Returns:** The converted image as binary data.
+    Convert an uploaded image to the desired format.
+    Requires x402 payment header.
     """
-    logger.info(f"Received conversion request: {file.filename} -> {output_format}")
+    logger.info(f"Received conversion request: {file.filename} -> {to_format}")
 
-    if output_format not in SUPPORTED_FORMATS:
+    if to_format not in SUPPORTED_FORMATS:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported output format. Choose from: {SUPPORTED_FORMATS}",
+            detail=f"Unsupported format '{to_format}'. Use: {SUPPORTED_FORMATS}",
         )
 
     try:
-        contents = await file.read()
-        logger.info(f"Read {len(contents)} bytes from upload")
-
-        img = Image.open(io.BytesIO(contents))
-        logger.info(f"Opened image: {img.format} {img.size} {img.mode}")
-
-        if output_format in {"jpg", "jpeg"} and img.mode in ("RGBA", "LA", "P"):
-            logger.info(f"Converting {img.mode} to RGB for JPEG output")
-            rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-            if img.mode == "P":
-                img = img.convert("RGBA")
-            rgb_img.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
-            img = rgb_img
-
-        output = io.BytesIO()
-        pil_format = PIL_FORMAT_MAP[output_format]
-        img.save(output, format=pil_format)
-        output.seek(0)
-
-        logger.info(f"Successfully converted to {output_format}")
-
-        return Response(
-            content=output.read(),
-            media_type=MIME_MAP[output_format],
-            headers={
-                "Content-Disposition": f'attachment; filename="converted.{output_format}"'
-            },
-        )
-
+        image_bytes = await file.read()
+        logger.info(f"Read {len(image_bytes)} bytes")
     except Exception as e:
-        logger.error(f"Conversion failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+        logger.error(f"Failed to read file: {e}")
+        raise HTTPException(status_code=400, detail="Could not read uploaded file")
 
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        logger.info(f"Opened image: {image.format} {image.size} {image.mode}")
+    except Exception as e:
+        logger.error(f"Failed to open image: {e}")
+        raise HTTPException(status_code=400, detail="Invalid image file")
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
+    if to_format in {"jpg", "jpeg"} and image.mode in {"RGBA", "P", "LA"}:
+        logger.info(f"Converting {image.mode} -> RGB for JPEG")
+        rgb = Image.new("RGB", image.size, (255, 255, 255))
+        if image.mode == "P":
+            image = image.convert("RGBA")
+        rgb.paste(image, mask=image.split()[-1] if image.mode in {"RGBA", "LA"} else None)
+        image = rgb
+
+    output = io.BytesIO()
+    try:
+        pil_format = PIL_FORMAT_MAP[to_format]
+        image.save(output, format=pil_format)
+        output.seek(0)
+        logger.info(f"Converted to {pil_format}, size={output.getbuffer().nbytes}")
+    except Exception as e:
+        logger.error(f"Conversion failed: {e}")
+        raise HTTPException(status_code=500, detail="Image conversion failed")
+
+    mime = MIME_MAP[to_format]
+    filename = f"converted.{to_format}"
+    return Response(
+        content=output.getvalue(),
+        media_type=mime,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
