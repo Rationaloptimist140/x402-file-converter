@@ -1,17 +1,17 @@
 # x402 File Converter
 
-A pay-per-use image conversion API built with FastAPI and the [x402 payment protocol](https://x402.org). Each conversion costs **$0.02 USDC** on Base, paid automatically by any x402-compatible client.
+A pay-per-use image conversion API built with FastAPI and the [x402 payment protocol](https://x402.org). Each conversion costs **$0.02 USDC** on Base Sepolia, paid automatically by any x402-compatible client.
 
 ## What It Does
 
-- Accepts image uploads (PNG, JPG, JPEG, WebP, GIF, BMP, TIFF)
-- Converts them to any of: `png`, `jpg`, `jpeg`, `webp`
+- Accepts image uploads (PNG, JPG, JPEG, WebP)
+- Converts to any of: `png`, `jpg`, `jpeg`, `webp`
 - Charges **$0.02 USDC per conversion** via the x402 protocol
-- Returns a 402 Payment Required response to non-paying clients with full payment details
+- Returns a `402 Payment Required` response to non-paying clients with full payment details in the `payment-required` header
 - Verifies payment on-chain before processing the file
 
-**Payment wallet:** `0x65F204B928a32806FCb364cB8d36B49b647c9f30`
-**Network:** Base (base-mainnet)
+**Payment wallet:** `0x7c2e102FC6D1FbCd3E62C936d3d394Bd55C949f2`  
+**Network:** Base Sepolia (`eip155:84532`) — testnet; mainnet pending x402.org facilitator support  
 **Price:** $0.02 USDC per conversion
 
 ---
@@ -29,20 +29,20 @@ cd x402-file-converter
 
 1. Go to [railway.app](https://railway.app) and create a new project
 2. Choose **Deploy from GitHub repo** and select `x402-file-converter`
-3. Railway auto-detects Python via Nixpacks and uses `railway.json` for the start command
+3. Railway auto-detects Python via Nixpacks and uses `railway.toml` for the start command
 
 ### 3. Set environment variables
 
 In Railway > your service > **Variables**, add:
 
-| Variable | Value |
-|---|---|
-| `PAYMENT_WALLET_ADDRESS` | `0x65F204B928a32806FCb364cB8d36B49b647c9f30` |
-| `PRICE_USDC` | `0.02` |
-| `NETWORK` | `base` |
-| `ENV` | `production` |
+| Variable | Value | Notes |
+|---|---|---|
+| `EVM_ADDRESS` | `0x7c2e102FC6D1FbCd3E62C936d3d394Bd55C949f2` | Wallet receiving USDC |
+| `FACILITATOR_URL` | `https://x402.org/facilitator` | x402 payment facilitator |
+| `NETWORK` | `eip155:84532` | Base Sepolia testnet |
+| `PRICE` | `$0.02` | Dollar-prefixed string |
 
-> `PORT` is set automatically by Railway - do not override it.
+> `PORT` is set automatically by Railway — do not override it.
 
 ### 4. Deploy
 
@@ -60,7 +60,7 @@ curl -X POST https://your-service.up.railway.app/convert \
   -F "format=webp"
 ```
 
-Returns HTTP 402 with x402 payment details:
+Returns HTTP `402` with x402 payment details in the `payment-required` response header (Base64-encoded JSON):
 
 ```json
 {
@@ -68,14 +68,14 @@ Returns HTTP 402 with x402 payment details:
   "accepts": [
     {
       "scheme": "exact",
-      "network": "base-mainnet",
+      "network": "eip155:84532",
       "maxAmountRequired": "20000",
       "resource": "https://your-service.up.railway.app/convert",
-      "description": "Image format conversion - $0.02 USDC",
-      "mimeType": "application/json",
-      "payTo": "0x65F204B928a32806FCb364cB8d36B49b647c9f30",
+      "description": "Convert image format ($0.02 USDC)",
+      "mimeType": "image/*",
+      "payTo": "0x7c2e102FC6D1FbCd3E62C936d3d394Bd55C949f2",
       "maxTimeoutSeconds": 300,
-      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
     }
   ]
 }
@@ -107,6 +107,7 @@ with open("photo_converted.webp", "wb") as out:
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
+# Edit .env and set EVM_ADDRESS to your wallet
 uvicorn main:app --reload
 # Docs at http://localhost:8000/docs
 ```
@@ -116,17 +117,21 @@ uvicorn main:app --reload
 ## Endpoints
 
 | Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/` | None | Service info and pricing |
-| GET | `/health` | None | Health check (used by Railway) |
-| POST | `/convert` | x402 payment | Convert an image |
-| GET | `/docs` | None | Swagger UI |
+|--------|------|------|-------------|
+| GET | `/` | None | Service info |
+| GET | `/health` | None | Health check |
+| POST | `/convert` | x402 ($0.02) | Convert image format |
+
+## Upload Limits
+
+| Limit | Value |
+|-------|-------|
+| Max file size | 10 MB |
+| Supported input formats | PNG, JPG, JPEG, WebP |
+| Supported output formats | PNG, JPG, JPEG, WebP |
 
 ---
 
-## Tech Stack
+## License
 
-- [FastAPI](https://fastapi.tiangolo.com/) - API framework
-- [Pillow](https://python-pillow.org/) - Image processing
-- [x402](https://x402.org) - HTTP 402 payment protocol (USDC on Base)
-- [Railway](https://railway.app) - Deployment
+MIT
