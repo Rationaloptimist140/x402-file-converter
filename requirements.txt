@@ -1,6 +1,6 @@
-fastapi>=0.115.0
+fastapi==0.115.6
 uvicorn[standard]==0.27.0
-Pillow>=10.4.0
+Pillow==11.1.0
 python-multipart==0.0.9
 x402[fastapi,evm]==2.0.0
-httpx
+httpx==0.28.1
